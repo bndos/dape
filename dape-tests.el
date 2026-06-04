@@ -703,5 +703,122 @@ Expects line with string \"breakpoint\" in source."
    ;; Second session still running
    (should (= 1 (length (dape--live-connections-root))))))
 
+(ert-deftest dape-test-launch-json-jsonc ()
+  "Parse VS Code JSONC syntax without changing strings."
+  (let* ((json (dape--launch-json-jsonc-to-json
+                "{// comment\n\"configurations\": [{\"name\": \"A\", \"args\": [\"http://x//y\", \"/*z*/\",],}],}\n"))
+         (parsed (json-parse-string json
+                                    :object-type 'hash-table
+                                    :array-type 'list
+                                    :null-object :null
+                                    :false-object :json-false))
+         (config (aref (plist-get (dape--launch-json-json-to-elisp parsed)
+                                  :configurations)
+                       0)))
+    (should (equal (plist-get config :name) "A"))
+    (should (equal (plist-get config :args)
+                   ["http://x//y" "/*z*/"]))))
+
+(ert-deftest dape-test-launch-json-configs ()
+  "Generate Dape configs from launch.json with variables, platform keys and tasks."
+  (let* ((temp-dir (make-temp-file "dape-launch-json-" t))
+         (default-directory temp-dir)
+         (vscode-dir (expand-file-name ".vscode" temp-dir))
+         (main-file (expand-file-name "main.js" temp-dir))
+         (sub-dir (expand-file-name "sub" temp-dir))
+         (dape-configs '((js-debug-node
+                          modes nil
+                          command "node"
+                          command-args ("adapter.js")
+                          :type "pwa-node"
+                          :request "launch"
+                          :cwd ".")))
+         (old-foo (getenv "FOO")))
+    (unwind-protect
+        (progn
+          (make-directory vscode-dir)
+          (make-directory sub-dir)
+          (with-temp-file main-file (insert "console.log(1);"))
+          (with-temp-file (expand-file-name "launch.json" vscode-dir)
+            (insert "{\n"
+                    "  // comments and trailing commas are valid in VS Code\n"
+                    "  \"version\": \"0.2.0\",\n"
+                    "  \"inputs\": [{\"id\": \"target\", \"type\": \"pickString\", \"options\": [\"app.js\"]}],\n"
+                    "  \"configurations\": [{\n"
+                    "    \"name\": \"Node App\",\n"
+                    "    \"type\": \"pwa-node\",\n"
+                    "    \"request\": \"launch\",\n"
+                    "    \"program\": \"${workspaceFolder}/${input:target}\",\n"
+                    "    \"cwd\": \"${workspaceFolder}\",\n"
+                    "    \"args\": [\"base\"],\n"
+                    "    \"env\": {\"FOO\": \"${env:FOO}\", \"EMPTY\": null, \"NO\": false},\n"
+                    "    \"linux\": {\"args\": [\"linux\"]},\n"
+                    "    \"preLaunchTask\": \"build\",\n"
+                    "  }]\n"
+                    "}\n"))
+          (with-temp-file (expand-file-name "tasks.json" vscode-dir)
+            (insert "{\n"
+                    "  \"version\": \"2.0.0\",\n"
+                    "  \"tasks\": [{\n"
+                    "    \"label\": \"build\",\n"
+                    "    \"type\": \"shell\",\n"
+                    "    \"command\": \"npm\",\n"
+                    "    \"args\": [\"run\", \"build\"],\n"
+                    "    \"options\": {\"cwd\": \"${workspaceFolder}/sub\", \"env\": {\"NODE_ENV\": \"test\"}}\n"
+                    "  }]\n"
+                    "}\n"))
+          (setenv "FOO" "from-env")
+          (let ((system-type 'gnu/linux))
+            (with-current-buffer (find-file-noselect main-file)
+              (unwind-protect
+                  (let* ((entries (dape--launch-json-configs temp-dir))
+                         (entry (car entries))
+                         (config (cdr entry)))
+                    (should (eq (car entry) 'launch-json-node-app))
+                    (should (plist-get config 'launch-json))
+                    (should (equal (plist-get config 'command) "node"))
+                    (should (equal (plist-get config 'command-args) '("adapter.js")))
+                    (should (equal (plist-get config 'command-cwd) temp-dir))
+                    (should (equal (plist-get config :program)
+                                   (expand-file-name "app.js" temp-dir)))
+                    (should (equal (plist-get config :cwd)
+                                   (directory-file-name temp-dir)))
+                    (should (equal (plist-get config :args) ["linux"]))
+                    (should (equal (plist-get config :env)
+                                   '(:FOO "from-env" :EMPTY :null :NO nil)))
+                    (should (equal (plist-get config 'compile)
+                                   (format "cd %s && NODE_ENV=test && npm run build"
+                                           (shell-quote-argument sub-dir)))))
+                (kill-buffer (current-buffer))))))
+      (setenv "FOO" old-foo)
+      (delete-directory temp-dir t))))
+
+(ert-deftest dape-test-launch-json-read-config-hook-refreshes ()
+  "Refresh generated launch.json configs without duplicating stale entries."
+  (let* ((temp-dir (make-temp-file "dape-launch-json-hook-" t))
+         (default-directory temp-dir)
+         (vscode-dir (expand-file-name ".vscode" temp-dir))
+         (dape-configs '((debugpy
+                          modes nil
+                          command "python"
+                          command-args ("-m" "debugpy.adapter")
+                          :type "python"
+                          :request "launch"))))
+    (unwind-protect
+        (progn
+          (make-directory vscode-dir)
+          (with-temp-file (expand-file-name "launch.json" vscode-dir)
+            (insert "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"One\", \"type\": \"python\", \"request\": \"launch\", \"program\": \"${workspaceFolder}/one.py\"}]}"))
+          (with-temp-buffer
+            (setq default-directory temp-dir)
+            (dape--launch-json-read-config-hook)
+            (should (assq 'launch-json-one dape-configs))
+            (with-temp-file (expand-file-name "launch.json" vscode-dir)
+              (insert "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"Two\", \"type\": \"python\", \"request\": \"launch\", \"program\": \"${workspaceFolder}/two.py\"}]}"))
+            (dape--launch-json-read-config-hook)
+            (should-not (assq 'launch-json-one dape-configs))
+            (should (assq 'launch-json-two dape-configs))))
+      (delete-directory temp-dir t))))
+
 (provide 'dape-tests)
 ;;; dape-tests.el ends here

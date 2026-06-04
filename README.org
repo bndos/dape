@@ -24,6 +24,7 @@ For complete functionality, make sure to enable ~eldoc-mode~ in your source buff
 + Disassembly viewer
 + Integration with ~compile~
 + Debug adapter configuration ergonomics
++ VS Code =launch.json= compatibility for supported adapters
 + No external dependencies outside of core Emacs
 
 With ~(setq dape-buffer-window-arrangement 'right)~:
@@ -37,6 +38,8 @@ With =minibuffer= adapter configuration hints:
 
 * Configuration
 =Dape= includes pre-defined debug adapter configurations for various programming languages. Refer to ~dape-configs~ for more details. If =dape= doesn't include a configuration suitable for your needs, you can implement your own.
+
+=Dape= also reads VS Code =.vscode/launch.json= files from the current project root by default. Launch configurations are exposed as generated =dape-configs= entries with a =launch-json-= prefix and are merged onto matching Dape adapter configurations by =type= and =request=. This means =launch.json= provides the debug arguments while Dape still provides the debug adapter command. JSONC comments, trailing commas, platform overrides, common VS Code variables such as =${workspaceFolder}= and =${file}=, and simple =preLaunchTask= entries from =.vscode/tasks.json= are supported.
 
 #+begin_src emacs-lisp
   (use-package dape
@@ -90,9 +93,9 @@ With =minibuffer= adapter configuration hints:
 Dape has no dependencies outside of core Emacs packages, and tries to use get as much out of them possible.
 
 Dape takes a slightly different approach to configuration.
-+ =Dape= does not support ~launch.json~ files, if per project configuration is needed use ~dir-locals~ and ~dape-command~.
++ =Dape= supports ~launch.json~ files for adapters that have matching entries in ~dape-configs~. Per-project Emacs-specific configuration can still use ~dir-locals~ and ~dape-command~.
 + =Dape= enhances ergonomics within the minibuffer by allowing users to modify or add PLIST entries to an existing configuration using options. For example ~dape-config :cwd default-directory :program ＂/home/user/b.out＂ compile ＂gcc -g -o b.out main.c＂~.
-+ No magic, no special variables like =${workspaceFolder}=. Instead, functions and variables are resolved before starting a new session.
++ Emacs Lisp functions and variables in ~dape-configs~ are resolved before starting a new session; VS Code variables in ~launch.json~ are expanded when the file is imported.
 + Tries to envision how debug adapter configurations would be implemented in Emacs if vscode never existed.
 
 * Supported debug adapters

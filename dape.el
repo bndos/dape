@@ -56,6 +56,7 @@
 (require 'gdb-mi)
 (require 'hexl)
 (require 'tramp)
+(require 'json)
 (require 'jsonrpc)
 
 
@@ -539,6 +540,16 @@ Example value:
   :type 'sexp)
 ;;;###autoload(put 'dape-command 'safe-local-variable #'listp)
 
+(defcustom dape-launch-json t
+  "Non-nil means load VS Code launch configurations from `launch.json'.
+When enabled, `dape' reads `.vscode/launch.json' from the current
+project root and adds matching configurations to `dape-configs'."
+  :type 'boolean)
+
+(defcustom dape-launch-json-file ".vscode/launch.json"
+  "Path to VS Code launch configuration file relative to project root."
+  :type 'string)
+
 (defcustom dape-key-prefix "\C-x\C-a"
   "Prefix of all dape commands."
   :type 'key-sequence)
@@ -765,7 +776,7 @@ compilation is successful."
   "Show `dape-configs' hints in minibuffer."
   :type 'boolean)
 
-(defcustom dape-read-config-hook nil
+(defcustom dape-read-config-hook '(dape--launch-json-read-config-hook)
   "Called before `dape-configs' is evaluated into completion candidates."
   :type 'hook)
 
@@ -5610,6 +5621,421 @@ CONN is inferred for interactive invocations."
                            (mapconcat #'identity hint-rows "\n"))))
     (move-overlay dape--minibuffer-hint-overlay
                   (point-max) (point-max) (current-buffer))))
+
+
+;;; Launch JSON
+
+(defun dape--launch-json-jsonc-to-json (string)
+  "Return JSON from VS Code JSONC STRING."
+  (cl-labels
+      ((strip-comments
+        (string)
+        (let ((i 0)
+              (len (length string))
+              (in-string nil)
+              (escape nil)
+              out)
+          (while (< i len)
+            (let ((char (aref string i))
+                  (next (and (< (1+ i) len) (aref string (1+ i)))))
+              (cond
+               (in-string
+                (push char out)
+                (cond
+                 (escape (setq escape nil))
+                 ((= char ?\\) (setq escape t))
+                 ((= char ?\") (setq in-string nil)))
+                (setq i (1+ i)))
+               ((= char ?\")
+                (push char out)
+                (setq in-string t
+                      i (1+ i)))
+               ((and (= char ?/) (eq next ?/))
+                (setq i (+ i 2))
+                (while (and (< i len) (not (= (aref string i) ?\n)))
+                  (setq i (1+ i)))
+                (when (< i len)
+                  (push ?\n out)
+                  (setq i (1+ i))))
+               ((and (= char ?/) (eq next ?*))
+                (setq i (+ i 2))
+                (while (and (< (1+ i) len)
+                            (not (and (= (aref string i) ?*)
+                                      (= (aref string (1+ i)) ?/))))
+                  (when (= (aref string i) ?\n)
+                    (push ?\n out))
+                  (setq i (1+ i)))
+                (setq i (min len (+ i 2))))
+               (t
+                (push char out)
+                (setq i (1+ i))))))
+          (apply #'string (nreverse out))))
+       (strip-trailing-commas
+        (string)
+        (let ((i 0)
+              (len (length string))
+              (in-string nil)
+              (escape nil)
+              out)
+          (while (< i len)
+            (let ((char (aref string i)))
+              (cond
+               (in-string
+                (push char out)
+                (cond
+                 (escape (setq escape nil))
+                 ((= char ?\\) (setq escape t))
+                 ((= char ?\") (setq in-string nil)))
+                (setq i (1+ i)))
+               ((= char ?\")
+                (push char out)
+                (setq in-string t
+                      i (1+ i)))
+               ((and (= char ?,)
+                     (let ((j (1+ i)))
+                       (while (and (< j len)
+                                   (memq (aref string j)
+                                         '(?\s ?\t ?\n ?\r)))
+                         (setq j (1+ j)))
+                       (and (< j len) (memq (aref string j) '(?\] ?\})))))
+                (setq i (1+ i)))
+               (t
+                (push char out)
+                (setq i (1+ i))))))
+          (apply #'string (nreverse out)))))
+    (strip-trailing-commas (strip-comments string))))
+
+(defun dape--launch-json-keyword (key)
+  "Return JSON object KEY as keyword."
+  (intern (concat ":" key)))
+
+(defun dape--launch-json-json-to-elisp (value)
+  "Convert parsed JSON VALUE into Dape plist/vector conventions."
+  (cond
+   ((eq value :json-false) nil)
+   ((hash-table-p value)
+    (cl-loop for key being the hash-keys of value using (hash-values val)
+             append (list (dape--launch-json-keyword key)
+                          (dape--launch-json-json-to-elisp val))))
+   ((listp value)
+    (apply #'vector (mapcar #'dape--launch-json-json-to-elisp value)))
+   (t value)))
+
+(defun dape--launch-json-read (file)
+  "Read VS Code JSONC launch or task FILE."
+  (dape--launch-json-json-to-elisp
+   (json-parse-string
+    (dape--launch-json-jsonc-to-json
+     (with-temp-buffer
+       (insert-file-contents file)
+       (buffer-string)))
+    :object-type 'hash-table
+    :array-type 'list
+    :null-object :null
+    :false-object :json-false)))
+
+(defun dape--launch-json-platform-key ()
+  "Return current VS Code platform override key."
+  (pcase system-type
+    ('windows-nt :windows)
+    ('darwin :osx)
+    (_ :linux)))
+
+(defun dape--launch-json-plist-delete (plist prop)
+  "Return PLIST without PROP."
+  (cl-loop for (key value) on plist by #'cddr
+           unless (eq key prop)
+           append (list key value)))
+
+(defun dape--launch-json-merge-platform (config)
+  "Apply current platform override in launch CONFIG."
+  (let ((platform (plist-get config (dape--launch-json-platform-key))))
+    (dolist (key '(:windows :linux :osx))
+      (setq config (dape--launch-json-plist-delete config key)))
+    (when (dape--plistp platform)
+      (cl-loop for (key value) on platform by #'cddr do
+               (setq config (plist-put config key value))))
+    config))
+
+(defun dape--launch-json-file-name (file fn)
+  "Call FN with FILE or signal if FILE is nil."
+  (unless file
+    (user-error "No buffer file name for launch.json variable"))
+  (funcall fn file))
+
+(defun dape--launch-json-input-value (id inputs)
+  "Return default value for VS Code input ID from INPUTS."
+  (let ((input (seq-find (lambda (input)
+                           (equal (plist-get input :id) id))
+                         (append inputs nil))))
+    (unless input
+      (user-error "No launch.json input named `%s'" id))
+    (pcase (plist-get input :type)
+      ("promptString" (or (plist-get input :default) ""))
+      ("pickString" (or (plist-get input :default)
+                        (let ((options (plist-get input :options)))
+                          (when (> (length options) 0)
+                            (let ((option (aref options 0)))
+                              (if (dape--plistp option)
+                                  (plist-get option :value)
+                                option))))))
+      ("command" (user-error "launch.json command inputs are not supported by Dape"))
+      (_ (user-error "Unsupported launch.json input type `%s'"
+                     (plist-get input :type))))))
+
+(defun dape--launch-json-substitute-string (string root inputs)
+  "Substitute VS Code variables in STRING for ROOT and INPUTS."
+  (let ((file (buffer-file-name))
+        (regexp "\\${\\([^}]+\\)}"))
+    (replace-regexp-in-string
+     regexp
+     (lambda (match)
+       (let ((name (match-string 1 match)))
+         (cond
+          ((or (equal name "workspaceFolder")
+               (string-prefix-p "workspaceFolder:" name))
+           (directory-file-name root))
+          ((equal name "workspaceFolderBasename")
+           (file-name-nondirectory (directory-file-name root)))
+          ((equal name "file")
+           (dape--launch-json-file-name file #'identity))
+          ((equal name "relativeFile")
+           (dape--launch-json-file-name
+            file (lambda (file) (file-relative-name file root))))
+          ((equal name "relativeFileDirname")
+           (dape--launch-json-file-name
+            file (lambda (file)
+                   (file-name-directory (file-relative-name file root)))))
+          ((equal name "fileWorkspaceFolder")
+           (directory-file-name root))
+          ((equal name "fileBasename")
+           (dape--launch-json-file-name file #'file-name-nondirectory))
+          ((equal name "fileBasenameNoExtension")
+           (dape--launch-json-file-name
+            file (lambda (file) (file-name-base file))))
+          ((equal name "fileExtname")
+           (dape--launch-json-file-name
+            file (lambda (file) (or (file-name-extension file t) ""))))
+          ((equal name "fileDirname")
+           (dape--launch-json-file-name
+            file (lambda (file) (directory-file-name (file-name-directory file)))))
+          ((equal name "cwd") default-directory)
+          ((or (equal name "/") (equal name "pathSeparator"))
+           (if (eq system-type 'windows-nt) "\\" "/"))
+          ((string-prefix-p "env:" name)
+           (or (getenv (substring name 4)) ""))
+          ((string-prefix-p "input:" name)
+           (dape--launch-json-input-value (substring name 6) inputs))
+          ((string-prefix-p "command:" name)
+           (user-error "launch.json command variables are not supported by Dape"))
+          ((string-prefix-p "config:" name)
+           (user-error "launch.json config variables are not supported by Dape"))
+          (t (user-error "Unsupported launch.json variable `%s'" name)))))
+     string t t)))
+
+(defun dape--launch-json-substitute (value root inputs)
+  "Substitute VS Code variables in VALUE for ROOT and INPUTS."
+  (cond
+   ((stringp value)
+    (dape--launch-json-substitute-string value root inputs))
+   ((vectorp value)
+    (cl-map 'vector
+            (lambda (value)
+              (dape--launch-json-substitute value root inputs))
+            value))
+   ((dape--plistp value)
+    (cl-loop for (key val) on value by #'cddr
+             append (list key (dape--launch-json-substitute val root inputs))))
+   (t value)))
+
+(defun dape--launch-json-request (config)
+  "Return normalized request string from CONFIG."
+  (let ((request (plist-get config :request)))
+    (cond
+     ((stringp request) request)
+     ((keywordp request) (substring (symbol-name request) 1))
+     ((symbolp request) (symbol-name request))
+     (t "launch"))))
+
+(defun dape--launch-json-type (config)
+  "Return normalized type string from CONFIG."
+  (let ((type (plist-get config :type)))
+    (cond
+     ((stringp type) type)
+     ((keywordp type) (substring (symbol-name type) 1))
+     ((symbolp type) (symbol-name type)))))
+
+(defun dape--launch-json-base-config (config)
+  "Return Dape base config entry for VS Code launch CONFIG."
+  (let ((type (dape--launch-json-type config))
+        (request (dape--launch-json-request config)))
+    (or
+     (seq-find
+      (lambda (entry)
+        (let* ((base (cdr entry))
+               (base-type (dape--launch-json-type base))
+               (base-request (dape--launch-json-request base)))
+          (and (equal type base-type)
+               (equal request base-request))))
+      dape-configs)
+     (seq-find
+      (lambda (entry)
+        (let ((base-type (dape--launch-json-type (cdr entry))))
+          (equal type base-type)))
+      dape-configs)
+     (assq (intern request) dape-configs))))
+
+(defun dape--launch-json-shell-command (command args &optional process-p)
+  "Return shell command from VS Code task COMMAND and ARGS.
+If PROCESS-P is non-nil, shell quote COMMAND as an executable too."
+  (string-join
+   (delq nil
+         (cons (cond
+                ((not (stringp command)) nil)
+                (process-p (shell-quote-argument command))
+                (t command))
+               (mapcar
+                (lambda (arg)
+                  (when (dape--plistp arg)
+                    (setq arg (plist-get arg :value)))
+                  (when arg
+                    (shell-quote-argument (format "%s" arg))))
+                (append args nil))))
+   " "))
+
+(defun dape--launch-json-task-build-default-p (task)
+  "Non-nil if TASK is the default VS Code build task."
+  (let ((group (plist-get task :group)))
+    (or (equal group "build")
+        (and (dape--plistp group)
+             (equal (plist-get group :kind) "build")
+             (eq (plist-get group :isDefault) t)))))
+
+(defun dape--launch-json-find-task (tasks label)
+  "Find task named LABEL in TASKS."
+  (if (equal label "${defaultBuildTask}")
+      (or (seq-find #'dape--launch-json-task-build-default-p tasks)
+          (seq-find (lambda (task) (equal (plist-get task :group) "build")) tasks))
+    (seq-find (lambda (task)
+                (or (equal (plist-get task :label) label)
+                    (equal (plist-get task :taskName) label)))
+              tasks)))
+
+(defun dape--launch-json-task-command (root label inputs)
+  "Return compile command for task LABEL in ROOT using INPUTS."
+  (let ((file (expand-file-name ".vscode/tasks.json" root)))
+    (when (file-readable-p file)
+      (let* ((json (dape--launch-json-read file))
+             (tasks (plist-get json :tasks))
+             (task (and (vectorp tasks)
+                        (dape--launch-json-find-task (append tasks nil) label))))
+        (when task
+          (setq task (dape--launch-json-substitute
+                      (dape--launch-json-merge-platform task) root inputs))
+          (let* ((type (or (plist-get task :type) "shell"))
+                 (command (plist-get task :command))
+                 (args (or (plist-get task :args) []))
+                 (options (plist-get task :options))
+                 (cwd (and (dape--plistp options) (plist-get options :cwd)))
+                 (env (and (dape--plistp options) (plist-get options :env)))
+                 (cmd (dape--launch-json-shell-command
+                       command args (equal type "process")))
+                 parts)
+            (when (and cmd (not (string-empty-p cmd)))
+              (when cwd
+                (push (format "cd %s" (shell-quote-argument cwd)) parts))
+              (when (dape--plistp env)
+                (push (string-trim-right
+                       (cl-loop for (key value) on env by #'cddr
+                                concat
+                                (format "%s=%s "
+                                        (substring (symbol-name key) 1)
+                                        (shell-quote-argument
+                                         (format "%s" value)))))
+                      parts))
+              (push cmd parts)
+              (string-join (nreverse parts) " && "))))))))
+
+(defun dape--launch-json-config-symbol (name used)
+  "Return unique generated config symbol from NAME avoiding USED."
+  (let* ((base-name
+          (or (and (stringp name) (not (string-empty-p name)) name)
+              "configuration"))
+         (slug (downcase
+                (string-trim
+                 (replace-regexp-in-string "[^[:alnum:]_]+" "-" base-name)
+                 "-" "-")))
+         (slug (if (string-empty-p slug) "configuration" slug))
+         (base (intern (concat "launch-json-" slug)))
+         (candidate base)
+         (index 2))
+    (while (memq candidate used)
+      (setq candidate (intern (format "%s-%d" base index))
+            index (1+ index)))
+    candidate))
+
+(defun dape--launch-json-config (config root inputs)
+  "Return Dape config generated from VS Code CONFIG in ROOT with INPUTS."
+  (setq config (dape--launch-json-substitute
+                (dape--launch-json-merge-platform config) root inputs))
+  (let* ((base-entry (dape--launch-json-base-config config))
+         (base (copy-tree (cdr base-entry)))
+         (pre-launch-task (plist-get config :preLaunchTask))
+         (task-command
+          (when (stringp pre-launch-task)
+            (or (dape--launch-json-task-command root pre-launch-task inputs)
+                (lambda ()
+                  (user-error "Unable to resolve launch.json preLaunchTask `%s'"
+                              pre-launch-task))))))
+    (unless base-entry
+      (user-error "No Dape base config found for launch.json type `%s' request `%s'"
+                  (dape--launch-json-type config)
+                  (dape--launch-json-request config)))
+    (dolist (key '(:presentation :preLaunchTask :postDebugTask))
+      (setq config (dape--launch-json-plist-delete config key)))
+    (cl-loop for (key value) on config by #'cddr do
+             (setq base (plist-put base key value)))
+    (setq base (plist-put base 'launch-json t))
+    (setq base (plist-put base 'command-cwd root))
+    (when task-command
+      (setq base (plist-put base 'compile task-command)))
+    base))
+
+(defun dape--launch-json-configs (root)
+  "Return Dape config entries from VS Code launch file under ROOT."
+  (let* ((file (expand-file-name dape-launch-json-file root))
+         (json (dape--launch-json-read file))
+         (configurations (plist-get json :configurations))
+         (inputs (or (plist-get json :inputs) []))
+         (used (mapcar #'car dape-configs))
+         entries)
+    (unless (vectorp configurations)
+      (user-error "%s does not contain a configurations array" file))
+    (dolist (config (append configurations nil))
+      (when (dape--plistp config)
+        (let ((name (dape--launch-json-config-symbol
+                     (plist-get config :name) used)))
+          (push name used)
+          (push (cons name (dape--launch-json-config config root inputs)) entries))))
+    (nreverse entries)))
+
+(defun dape--launch-json-read-config-hook ()
+  "Populate `dape-configs' with project VS Code launch configurations."
+  (when dape-launch-json
+    (let* ((root (dape-command-cwd))
+           (file (expand-file-name dape-launch-json-file root)))
+      (setq-local dape-configs
+                  (cl-remove-if (lambda (entry)
+                                  (plist-get (cdr entry) 'launch-json))
+                                dape-configs))
+      (when (file-readable-p file)
+        (condition-case err
+            (setq-local dape-configs
+                        (append dape-configs
+                                (dape--launch-json-configs root)))
+          (error
+           (dape--warn "Failed to load %s: %s"
+                       file (error-message-string err))))))))
 
 
 ;;; Config
