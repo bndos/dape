@@ -5979,7 +5979,9 @@ If PROCESS-P is non-nil, shell quote COMMAND as an executable too."
   (setq config (dape--launch-json-substitute
                 (dape--launch-json-merge-platform config) root inputs))
   (let* ((base-entry (dape--launch-json-base-config config))
-         (base (copy-tree (cdr base-entry)))
+         (base (cl-loop for (key value) on (copy-tree (cdr base-entry)) by #'cddr
+                        unless (keywordp key)
+                        append (list key value)))
          (pre-launch-task (plist-get config :preLaunchTask))
          (task-command
           (when (stringp pre-launch-task)

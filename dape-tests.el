@@ -732,7 +732,8 @@ Expects line with string \"breakpoint\" in source."
                           command-args ("adapter.js")
                           :type "pwa-node"
                           :request "launch"
-                          :cwd ".")))
+                          :cwd "."
+                          :program "should-not-inherit")))
          (old-foo (getenv "FOO")))
     (unwind-protect
         (progn
@@ -758,7 +759,8 @@ Expects line with string \"breakpoint\" in source."
                     "    \"name\": \"Node App No Env Task\",\n"
                     "    \"type\": \"pwa-node\",\n"
                     "    \"request\": \"launch\",\n"
-                    "    \"program\": \"${workspaceFolder}/${input:target}\",\n"
+                    "    \"runtimeExecutable\": \"pnpm\",\n"
+                    "    \"runtimeArgs\": [\"dev\"],\n"
                     "    \"preLaunchTask\": \"build-no-env\"\n"
                     "  }]\n"
                     "}\n"))
@@ -805,6 +807,11 @@ Expects line with string \"breakpoint\" in source."
                     (let ((no-env-config
                            (cdr (assq 'launch-json-node-app-no-env-task
                                       entries))))
+                      (should-not (plist-get no-env-config :program))
+                      (should (equal (plist-get no-env-config :runtimeExecutable)
+                                     "pnpm"))
+                      (should (equal (plist-get no-env-config :runtimeArgs)
+                                     ["dev"]))
                       (should (equal (plist-get no-env-config 'compile)
                                      (format "cd %s && npm run prepare"
                                              (shell-quote-argument sub-dir))))))
