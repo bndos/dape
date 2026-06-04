@@ -3057,15 +3057,20 @@ For more information see `dape-configs'."
                       (copy-tree config))))
   (if (plist-get config 'launch-json-compound)
       (dape--launch-json-start-compound config)
-    (if (and (not skip-compile) (plist-get config 'compile))
-        (dape--compile config (lambda () (dape config 'skip-compile)))
-      ;; Run start hooks before connection creation so that the REPL
-      ;; buffer exists when `dape--create-connection' emits messages.
-      (run-hooks 'dape-start-hook)
-      (let ((conn (dape--create-connection config)))
-        (push conn dape--connections)
-        (setq dape--connection-selected conn)
-        (dape--start-debugging conn)))))
+    (dape--start-config config skip-compile)))
+
+(defun dape--start-config (config &optional skip-compile)
+  "Start debugging session with CONFIG.
+SKIP-COMPILE has the same meaning as in `dape'."
+  (if (and (not skip-compile) (plist-get config 'compile))
+      (dape--compile config (lambda () (dape config 'skip-compile)))
+    ;; Run start hooks before connection creation so that the REPL
+    ;; buffer exists when `dape--create-connection' emits messages.
+    (run-hooks 'dape-start-hook)
+    (let ((conn (dape--create-connection config)))
+      (push conn dape--connections)
+      (setq dape--connection-selected conn)
+      (dape--start-debugging conn))))
 
 
 ;;; Compile
@@ -6157,7 +6162,8 @@ non-nil and function uses the minibuffer."
 See `dape--config-eval-value' for SKIP-FUNCTIONS and SKIP-INTERACTIVE."
   (cl-loop for (key value) on config by 'cddr append
            (cond
-            ((memql key '(modes fn ensure)) (list key value))
+            ((memql key '(modes fn ensure launch-json-compound-configs))
+             (list key value))
             ((list key
                    (dape--config-eval-value value
                                             skip-functions
