@@ -3055,15 +3055,17 @@ For more information see `dape-configs'."
           (seq-reduce (lambda (config fn) (funcall fn config))
                       (append fns dape-default-config-functions)
                       (copy-tree config))))
-  (if (and (not skip-compile) (plist-get config 'compile))
-      (dape--compile config (lambda () (dape config 'skip-compile)))
-    ;; Run start hooks before connection creation so that the REPL
-    ;; buffer exists when `dape--create-connection' emits messages.
-    (run-hooks 'dape-start-hook)
-    (let ((conn (dape--create-connection config)))
-      (push conn dape--connections)
-      (setq dape--connection-selected conn)
-      (dape--start-debugging conn))))
+  (if (plist-get config 'launch-json-compound)
+      (dape--launch-json-start-compound config)
+    (if (and (not skip-compile) (plist-get config 'compile))
+        (dape--compile config (lambda () (dape config 'skip-compile)))
+      ;; Run start hooks before connection creation so that the REPL
+      ;; buffer exists when `dape--create-connection' emits messages.
+      (run-hooks 'dape-start-hook)
+      (let ((conn (dape--create-connection config)))
+        (push conn dape--connections)
+        (setq dape--connection-selected conn)
+        (dape--start-debugging conn)))))
 
 
 ;;; Compile
@@ -6007,22 +6009,83 @@ If PROCESS-P is non-nil, shell quote COMMAND as an executable too."
       (setq base (plist-put base 'compile task-command)))
     base))
 
+(defun dape--launch-json-compound-ref-name (ref)
+  "Return launch configuration name from compound REF."
+  (cond
+   ((stringp ref) ref)
+   ((dape--plistp ref) (plist-get ref :name))
+   (t nil)))
+
+(defun dape--launch-json-compound-config (compound config-map root)
+  "Return Dape config for VS Code COMPOUND using CONFIG-MAP under ROOT."
+  (let* ((refs (plist-get compound :configurations))
+         (configs
+          (cl-loop for ref in (append refs nil)
+                   for name = (dape--launch-json-compound-ref-name ref)
+                   for config = (and name (cdr (assoc name config-map)))
+                   unless config
+                   do (user-error
+                       "Unable to resolve launch.json compound configuration %s"
+                       name)
+                   collect (copy-tree config))))
+    (unless (vectorp refs)
+      (user-error "launch.json compound %s does not contain a configurations array"
+                  (plist-get compound :name)))
+    (list 'launch-json t
+          'launch-json-compound t
+          'modes nil
+          'command-cwd root
+          'launch-json-compound-stop-all (eq (plist-get compound :stopAll) t)
+          'launch-json-compound-configs configs)))
+
+(defun dape--launch-json-start-compound-1 (configs)
+  "Start launch.json compound CONFIGS sequentially."
+  (when-let* ((config (copy-tree (car configs))))
+    (let ((next (lambda ()
+                  (dape config 'skip-compile)
+                  (dape--launch-json-start-compound-1 (cdr configs)))))
+      (if (plist-get config 'compile)
+          (dape--compile config next)
+        (funcall next)))))
+
+(defun dape--launch-json-start-compound (config)
+  "Start every configuration in launch.json compound CONFIG."
+  (let ((configs (plist-get config 'launch-json-compound-configs)))
+    (unless configs
+      (user-error "Launch JSON compound does not contain configurations"))
+    (dape--launch-json-start-compound-1 configs)))
+
 (defun dape--launch-json-configs (root)
   "Return Dape config entries from VS Code launch file under ROOT."
   (let* ((file (expand-file-name dape-launch-json-file root))
          (json (dape--launch-json-read file))
          (configurations (plist-get json :configurations))
+         (compounds (plist-get json :compounds))
          (inputs (or (plist-get json :inputs) []))
          (used (mapcar #'car dape-configs))
-         entries)
+         entries
+         config-map)
     (unless (vectorp configurations)
       (user-error "%s does not contain a configurations array" file))
     (dolist (config (append configurations nil))
       (when (dape--plistp config)
-        (let ((name (dape--launch-json-config-symbol
-                     (plist-get config :name) used)))
+        (let* ((config-name (plist-get config :name))
+               (name (dape--launch-json-config-symbol config-name used))
+               (dape-config (dape--launch-json-config config root inputs)))
           (push name used)
-          (push (cons name (dape--launch-json-config config root inputs)) entries))))
+          (push (cons name dape-config) entries)
+          (when config-name
+            (push (cons config-name dape-config) config-map)))))
+    (when (vectorp compounds)
+      (dolist (compound (append compounds nil))
+        (when (dape--plistp compound)
+          (let ((name (dape--launch-json-config-symbol
+                       (plist-get compound :name) used)))
+            (push name used)
+            (push (cons name
+                        (dape--launch-json-compound-config
+                         compound config-map root))
+                  entries)))))
     (nreverse entries)))
 
 (defun dape--launch-json-read-config-hook ()

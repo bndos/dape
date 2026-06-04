@@ -846,5 +846,59 @@ Expects line with string \"breakpoint\" in source."
             (should (assq 'launch-json-two dape-configs))))
       (delete-directory temp-dir t))))
 
+(ert-deftest dape-test-launch-json-compounds ()
+  "Generate and start launch.json compound configurations."
+  (let* ((temp-dir (make-temp-file "dape-launch-json-compound-" t))
+         (default-directory temp-dir)
+         (vscode-dir (expand-file-name ".vscode" temp-dir))
+         (started nil)
+         (dape-default-config-functions nil)
+         (dape-configs '((js-debug-node
+                          modes nil
+                          command "node"
+                          command-args ("adapter.js")
+                          :type "pwa-node"
+                          :request "launch"))))
+    (unwind-protect
+        (progn
+          (make-directory vscode-dir)
+          (with-temp-file (expand-file-name "launch.json" vscode-dir)
+            (insert "{\n"
+                    "  \"version\": \"0.2.0\",\n"
+                    "  \"configurations\": [{\n"
+                    "    \"name\": \"Server\",\n"
+                    "    \"type\": \"pwa-node\",\n"
+                    "    \"request\": \"launch\",\n"
+                    "    \"program\": \"${workspaceFolder}/server.js\"\n"
+                    "  }, {\n"
+                    "    \"name\": \"Browser\",\n"
+                    "    \"type\": \"pwa-node\",\n"
+                    "    \"request\": \"launch\",\n"
+                    "    \"program\": \"${workspaceFolder}/browser.js\"\n"
+                    "  }],\n"
+                    "  \"compounds\": [{\n"
+                    "    \"name\": \"Full Stack\",\n"
+                    "    \"configurations\": [\"Server\", \"Browser\"],\n"
+                    "    \"stopAll\": true\n"
+                    "  }]\n"
+                    "}\n"))
+          (let* ((entries (dape--launch-json-configs temp-dir))
+                 (compound (cdr (assq 'launch-json-full-stack entries))))
+            (should (assq 'launch-json-server entries))
+            (should (assq 'launch-json-browser entries))
+            (should compound)
+            (should (plist-get compound 'launch-json))
+            (should (plist-get compound 'launch-json-compound))
+            (should (plist-get compound 'launch-json-compound-stop-all))
+            (should (length= (plist-get compound 'launch-json-compound-configs) 2))
+            (cl-letf (((symbol-function 'dape)
+                       (lambda (config &optional _skip-compile)
+                         (push (plist-get config :program) started))))
+              (dape--launch-json-start-compound compound))
+            (should (equal (nreverse started)
+                           (list (expand-file-name "server.js" temp-dir)
+                                 (expand-file-name "browser.js" temp-dir))))))
+      (delete-directory temp-dir t))))
+
 (provide 'dape-tests)
 ;;; dape-tests.el ends here
