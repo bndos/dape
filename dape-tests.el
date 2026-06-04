@@ -754,6 +754,12 @@ Expects line with string \"breakpoint\" in source."
                     "    \"env\": {\"FOO\": \"${env:FOO}\", \"EMPTY\": null, \"NO\": false},\n"
                     "    \"linux\": {\"args\": [\"linux\"]},\n"
                     "    \"preLaunchTask\": \"build\",\n"
+                    "  }, {\n"
+                    "    \"name\": \"Node App No Env Task\",\n"
+                    "    \"type\": \"pwa-node\",\n"
+                    "    \"request\": \"launch\",\n"
+                    "    \"program\": \"${workspaceFolder}/${input:target}\",\n"
+                    "    \"preLaunchTask\": \"build-no-env\"\n"
                     "  }]\n"
                     "}\n"))
           (with-temp-file (expand-file-name "tasks.json" vscode-dir)
@@ -765,6 +771,12 @@ Expects line with string \"breakpoint\" in source."
                     "    \"command\": \"npm\",\n"
                     "    \"args\": [\"run\", \"build\"],\n"
                     "    \"options\": {\"cwd\": \"${workspaceFolder}/sub\", \"env\": {\"NODE_ENV\": \"test\"}}\n"
+                    "  }, {\n"
+                    "    \"label\": \"build-no-env\",\n"
+                    "    \"type\": \"shell\",\n"
+                    "    \"command\": \"npm\",\n"
+                    "    \"args\": [\"run\", \"prepare\"],\n"
+                    "    \"options\": {\"cwd\": \"${workspaceFolder}/sub\"}\n"
                     "  }]\n"
                     "}\n"))
           (setenv "FOO" "from-env")
@@ -789,7 +801,13 @@ Expects line with string \"breakpoint\" in source."
                                    '(:FOO "from-env" :EMPTY :null :NO nil)))
                     (should (equal (plist-get config 'compile)
                                    (format "cd %s && NODE_ENV=test && npm run build"
-                                           (shell-quote-argument sub-dir)))))
+                                           (shell-quote-argument sub-dir))))
+                    (let ((no-env-config
+                           (cdr (assq 'launch-json-node-app-no-env-task
+                                      entries))))
+                      (should (equal (plist-get no-env-config 'compile)
+                                     (format "cd %s && npm run prepare"
+                                             (shell-quote-argument sub-dir))))))
                 (kill-buffer (current-buffer))))))
       (setenv "FOO" old-foo)
       (delete-directory temp-dir t))))

@@ -5944,7 +5944,7 @@ If PROCESS-P is non-nil, shell quote COMMAND as an executable too."
             (when (and cmd (not (string-empty-p cmd)))
               (when cwd
                 (push (format "cd %s" (shell-quote-argument cwd)) parts))
-              (when (dape--plistp env)
+              (when (and (consp env) (dape--plistp env))
                 (push (string-trim-right
                        (cl-loop for (key value) on env by #'cddr
                                 concat
