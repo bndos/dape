@@ -5996,6 +5996,10 @@ If PROCESS-P is non-nil, shell quote COMMAND as an executable too."
     (cl-loop for (key value) on config by #'cddr do
              (setq base (plist-put base key value)))
     (setq base (plist-put base 'launch-json t))
+    ;; VS Code launch configurations are project-level dispatches, not
+    ;; mode-specific Dape presets.  Do not hide them based on the base
+    ;; adapter's major-mode list.
+    (setq base (plist-put base 'modes nil))
     (setq base (plist-put base 'command-cwd root))
     (when task-command
       (setq base (plist-put base 'compile task-command)))

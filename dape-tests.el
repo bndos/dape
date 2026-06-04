@@ -727,7 +727,7 @@ Expects line with string \"breakpoint\" in source."
          (main-file (expand-file-name "main.js" temp-dir))
          (sub-dir (expand-file-name "sub" temp-dir))
          (dape-configs '((js-debug-node
-                          modes nil
+                          modes (js-mode js-ts-mode)
                           command "node"
                           command-args ("adapter.js")
                           :type "pwa-node"
@@ -776,6 +776,7 @@ Expects line with string \"breakpoint\" in source."
                          (config (cdr entry)))
                     (should (eq (car entry) 'launch-json-node-app))
                     (should (plist-get config 'launch-json))
+                    (should-not (plist-get config 'modes))
                     (should (equal (plist-get config 'command) "node"))
                     (should (equal (plist-get config 'command-args) '("adapter.js")))
                     (should (equal (plist-get config 'command-cwd) temp-dir))
