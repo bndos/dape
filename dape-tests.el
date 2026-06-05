@@ -325,6 +325,22 @@ Expects line with string \"breakpoint\" in source."
       (dape-test--should
        (dape-test--line-at-regex "^  a")))))
 
+(ert-deftest dape-test-info-buffer-list-filters-stale-buffers ()
+  "Do not keep stale non-Dape buffers in `dape--info-buffers'."
+  (let (stale scope
+        (dape--info-buffers nil))
+    (unwind-protect
+        (progn
+          (setq stale (get-buffer-create "*dape-info stale-test*"))
+          (with-current-buffer stale
+            (special-mode))
+          (push stale dape--info-buffers)
+          (setq scope (dape--info-get-buffer-create 'dape-info-scope-mode 0))
+          (should (memq scope (dape--info-buffer-list)))
+          (should-not (memq stale (dape--info-buffer-list))))
+      (when (buffer-live-p stale) (kill-buffer stale))
+      (when (buffer-live-p scope) (kill-buffer scope)))))
+
 (ert-deftest dape-test-scope-buffer ()
   "Assert basic scope buffer content."
   (dape-test--with-files

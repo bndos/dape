@@ -3867,7 +3867,12 @@ Buffer is displayed with `dape-display-source-buffer-action'."
 (defun dape--info-buffer-list ()
   "Return all live `dape-info-parent-mode' buffers."
   (setq dape--info-buffers
-        (cl-delete-if-not #'buffer-live-p dape--info-buffers)))
+        (cl-delete-if-not
+         (lambda (buffer)
+           (and (buffer-live-p buffer)
+                (with-current-buffer buffer
+                  (derived-mode-p 'dape-info-parent-mode))))
+         dape--info-buffers)))
 
 (defun dape--info-buffer-p (mode &optional index)
   "Is buffer of MODE with INDEX."
