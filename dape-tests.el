@@ -190,6 +190,28 @@ Expects line with string \"breakpoint\" in source."
      (equal (line-number-at-pos)
             (dape-test--line-at-regex "breakpoint")))))
 
+(ert-deftest dape-test-restart-uses-last-config-before-history ()
+  "Restart should not require history config to exist in current buffer."
+  (let ((dape--connections nil)
+        (dape-history '("launch-json-missing "))
+        (dape--config-last '(command "python" :program "script.py"))
+        restarted)
+    (cl-letf (((symbol-function 'dape)
+               (lambda (config &optional _skip-compile)
+                 (setq restarted config))))
+      (dape-restart)
+      (should (equal restarted '(command "python" :program "script.py"))))))
+
+(ert-deftest dape-test-dape-records-last-config ()
+  "Starting Dape records the expanded config for restart."
+  (let (dape--config-last started)
+    (cl-letf (((symbol-function 'dape--start-config)
+               (lambda (config &optional _skip-compile)
+                 (setq started config))))
+      (dape '(command "python" :request "launch"))
+      (should (equal started '(command "python" :request "launch")))
+      (should (equal dape--config-last '(command "python" :request "launch"))))))
+
 (ert-deftest dape-test-restart ()
   "Restart with restart."
   (dape-test--with-files

@@ -870,6 +870,9 @@ Debug logging has an noticeable effect on performance."
 (defvar dape-history nil
   "History variable for `dape'.")
 
+(defvar dape--config-last nil
+  "Last expanded debug configuration started by `dape'.")
+
 (defvar dape--breakpoints nil
   "List of `dape--breakpoint' objects (source, data, and exception).")
 (defvar dape--watched nil
@@ -2666,6 +2669,11 @@ SKIP-COMPILE is used internally for recursive calls."
                     (car dape--connections))))
       (dape--with-request (dape-kill conn)
         (dape (dape--config conn)))))
+   (;; Use last expanded configuration.  This keeps restart working for
+    ;; buffer-local configurations such as launch.json entries when the
+    ;; current buffer no longer has the originating `dape-configs'.
+    dape--config-last
+    (dape (copy-tree dape--config-last)))
    (;; Use history
     dape-history
     (dape (apply #'dape--config-eval (dape--config-from-string (car dape-history)))))
@@ -3055,6 +3063,7 @@ For more information see `dape-configs'."
           (seq-reduce (lambda (config fn) (funcall fn config))
                       (append fns dape-default-config-functions)
                       (copy-tree config))))
+  (setq dape--config-last (copy-tree config))
   (if (plist-get config 'launch-json-compound)
       (dape--launch-json-start-compound config)
     (dape--start-config config skip-compile)))
